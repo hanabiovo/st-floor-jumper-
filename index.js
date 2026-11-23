@@ -164,10 +164,12 @@
         return true;
     }
 
-    /** 等待浏览器完成下一次绘制，确保加载动画先渲染出来 */
+    /** 等待浏览器把加载提示真正合成并绘制到屏幕上，再开始重渲染 */
     function nextPaint() {
         return new Promise((resolve) => {
-            requestAnimationFrame(() => requestAnimationFrame(resolve));
+            requestAnimationFrame(() => {
+                setTimeout(resolve, 40);
+            });
         });
     }
 
@@ -181,14 +183,20 @@
 
         if (loading) {
             dom.noticeIcon.className = 'fa-solid fa-spinner fa-spin fj_notice_icon';
-        } else if (type === 'info') {
-            dom.noticeIcon.className = 'fa-solid fa-circle-info fj_notice_icon';
+            dom.notice.classList.add('fj_notice_instant');
         } else {
-            dom.noticeIcon.className = 'fa-solid fa-check fj_notice_icon';
+            dom.notice.classList.remove('fj_notice_instant');
+            dom.noticeIcon.className = type === 'info'
+                ? 'fa-solid fa-circle-info fj_notice_icon'
+                : 'fa-solid fa-check fj_notice_icon';
         }
 
         dom.noticeText.textContent = text;
         dom.notice.classList.add('fj_notice_visible');
+        if (loading) {
+            // 强制刷新样式，确保首帧即满不透明度显示
+            void dom.notice.offsetWidth;
+        }
 
         if (!loading && duration > 0) {
             state.noticeTimer = setTimeout(() => {

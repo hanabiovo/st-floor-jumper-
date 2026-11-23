@@ -584,9 +584,15 @@
     transform: translateX(-50%) translateY(0);
 }
 
+/* 加载提示立即满不透明度显示，不等过渡动画，防止被后续长列表渲染阻塞 */
+#fj_notice.fj_notice_instant {
+    transition: none !important;
+}
+
 #fj_notice .fj_notice_icon {
     color: var(--SmartThemeQuoteColor);
     flex-shrink: 0;
+    will-change: transform;
 }
 
 /* 跳转后的临时高亮效果（作为兜底） */
