@@ -5,25 +5,41 @@
     const METADATA_KEY = 'floor_jumper_bookmarks';
     const POS_STORAGE_KEY = 'st_floor_jumper_window_pos';
     const AUTO_CLOSE_STORAGE_KEY = 'st_floor_jumper_auto_close';
+    const FAB_ENABLED_STORAGE_KEY = 'st_floor_jumper_fab_enabled';
+    const FAB_MID_ACTION_STORAGE_KEY = 'st_floor_jumper_fab_mid_action';
     const ROW_HEIGHT = 58;
     const OVERSCAN = 6;
     const PREVIEW_MAX_LEN = 72;
 
-    function loadAutoClosePref() {
+    function loadBoolPref(key, defaultValue) {
         try {
-            const val = localStorage.getItem(AUTO_CLOSE_STORAGE_KEY);
-            return val === null ? true : val === '1';
+            const val = localStorage.getItem(key);
+            return val === null ? defaultValue : val === '1';
         } catch {
-            return true;
+            return defaultValue;
+        }
+    }
+
+    function loadStrPref(key, allowed, defaultValue) {
+        try {
+            const val = localStorage.getItem(key);
+            return val && allowed.includes(val) ? val : defaultValue;
+        } catch {
+            return defaultValue;
         }
     }
 
     const state = {
         isOpen: false,
+        settingsOpen: false,
         filter: 'all',      // 'all' | 'user' | 'bot' | 'bookmark' | 'hidden'
         query: '',
         reverseOrder: false,
-        autoClose: loadAutoClosePref(),
+        autoClose: loadBoolPref(AUTO_CLOSE_STORAGE_KEY, true),
+        fabEnabled: loadBoolPref(FAB_ENABLED_STORAGE_KEY, true),
+        fabMidAction: loadStrPref(FAB_MID_ACTION_STORAGE_KEY, ['jump_input', 'nearest_visible'], 'jump_input'),
+        fabExpanded: false,
+        fabHideTimer: null,
         batchMode: false,
         rangeMode: false,
         rangeAnchorFloor: null,
@@ -343,6 +359,70 @@
             const msg = direction < 0 ? '前面没有更早的用户消息了' : '后面没有更新的用户消息了';
             updateFooterStatus(msg);
             showNotice(msg, { type: 'info' });
+            return;
+        }
+        jumpToFloor(target);
+    }
+
+    /** 弹窗输入楼层号并跳转（供悬浮按钮中键使用） */
+    async function promptJumpToFloor() {
+        const chat = getChat();
+        if (!chat.length) {
+            showNotice('当前没有聊天记录', { type: 'info' });
+            return;
+        }
+        const maxFloor = chat.length - 1;
+        const promptText = `输入要跳转的楼层号（0 ~ ${maxFloor}）：`;
+        const ctx = getContext();
+        let raw = null;
+
+        if (typeof ctx?.callGenericPopup === 'function' && ctx?.POPUP_TYPE) {
+            const res = await ctx.callGenericPopup(promptText, ctx.POPUP_TYPE.INPUT, '');
+            if (res === null || res === false) return;
+            raw = String(res).trim();
+        } else {
+            const res = window.prompt(promptText, '');
+            if (res === null) return;
+            raw = res.trim();
+        }
+
+        if (raw === '') return;
+        const cleaned = raw.startsWith('#') ? raw.slice(1) : raw;
+        jumpToFloor(Number(cleaned));
+    }
+
+    /** 跳转到离当前位置最近的未隐藏楼层 */
+    function jumpToNearestVisibleFloor() {
+        const chat = getChat();
+        if (!chat.length) {
+            showNotice('当前没有聊天记录', { type: 'info' });
+            return;
+        }
+
+        const current = Math.max(0, Math.min(chat.length - 1, getCurrentVisibleFloor()));
+        if (!chat[current]?.is_system) {
+            const mesEl = document.querySelector(`#chat .mes[mesid="${current}"]`);
+            if (mesEl instanceof HTMLElement) flashElement(mesEl);
+            showNotice(`当前 #${current} 已是未隐藏楼层`, { type: 'info' });
+            return;
+        }
+
+        let target = -1;
+        for (let offset = 1; offset < chat.length; offset++) {
+            const forward = current + offset;
+            if (forward < chat.length && chat[forward] && !chat[forward].is_system) {
+                target = forward;
+                break;
+            }
+            const backward = current - offset;
+            if (backward >= 0 && chat[backward] && !chat[backward].is_system) {
+                target = backward;
+                break;
+            }
+        }
+
+        if (target === -1) {
+            showNotice('当前聊天没有未隐藏的楼层', { type: 'info' });
             return;
         }
         jumpToFloor(target);
@@ -678,6 +758,7 @@
         dom.win.classList.toggle('fj_hidden', !nextOpen);
 
         if (nextOpen) {
+            hideFabImmediately();
             state.keptInHiddenTab.clear();
             clampWindowToViewport();
             rebuildFilteredList(false);
@@ -781,6 +862,9 @@
                     <span class="fj_stats" id="fj_stats"></span>
                 </div>
                 <div class="fj_header_actions">
+                    <button type="button" class="fj_icon_btn" id="fj_settings_btn" title="悬浮按钮与设置">
+                        <i class="fa-solid fa-sliders"></i>
+                    </button>
                     <button type="button" class="fj_icon_btn" id="fj_sort_btn" title="切换正序/倒序">
                         <i class="fa-solid fa-arrow-down-short-wide"></i>
                     </button>
@@ -790,6 +874,20 @@
                     <button type="button" class="fj_icon_btn" id="fj_close_btn" title="关闭 (ESC)">
                         <i class="fa-solid fa-xmark"></i>
                     </button>
+                </div>
+            </div>
+
+            <div class="fj_settings_panel fj_hidden" id="fj_settings_panel">
+                <div class="fj_setting_row">
+                    <label class="fj_setting_label" for="fj_fab_enabled_cb">滑动时显示悬浮切楼按钮</label>
+                    <input type="checkbox" id="fj_fab_enabled_cb" ${state.fabEnabled ? 'checked' : ''} />
+                </div>
+                <div class="fj_setting_row">
+                    <label class="fj_setting_label" for="fj_fab_mid_select">悬浮展开中键功能</label>
+                    <select id="fj_fab_mid_select" class="fj_setting_select">
+                        <option value="jump_input" ${state.fabMidAction === 'jump_input' ? 'selected' : ''}>输入楼层号跳转</option>
+                        <option value="nearest_visible" ${state.fabMidAction === 'nearest_visible' ? 'selected' : ''}>抵达最近未隐藏楼层</option>
+                    </select>
                 </div>
             </div>
 
@@ -896,6 +994,10 @@
         dom.noticeText = notice.querySelector('.fj_notice_text');
         dom.dragHandle = win.querySelector('#fj_drag_handle');
         dom.stats = win.querySelector('#fj_stats');
+        dom.settingsBtn = win.querySelector('#fj_settings_btn');
+        dom.settingsPanel = win.querySelector('#fj_settings_panel');
+        dom.fabEnabledCb = win.querySelector('#fj_fab_enabled_cb');
+        dom.fabMidSelect = win.querySelector('#fj_fab_mid_select');
         dom.sortBtn = win.querySelector('#fj_sort_btn');
         dom.refreshBtn = win.querySelector('#fj_refresh_btn');
         dom.closeBtn = win.querySelector('#fj_close_btn');
@@ -930,6 +1032,35 @@
 
     function bindWindowEvents() {
         dom.closeBtn.addEventListener('click', () => toggleWindow(false));
+
+        dom.settingsBtn.addEventListener('click', () => {
+            state.settingsOpen = !state.settingsOpen;
+            dom.settingsBtn.classList.toggle('fj_active', state.settingsOpen);
+            dom.settingsPanel.classList.toggle('fj_hidden', !state.settingsOpen);
+        });
+
+        dom.fabEnabledCb.addEventListener('change', () => {
+            state.fabEnabled = dom.fabEnabledCb.checked;
+            try {
+                localStorage.setItem(FAB_ENABLED_STORAGE_KEY, state.fabEnabled ? '1' : '0');
+            } catch { /* ignore */ }
+            if (!state.fabEnabled) {
+                hideFabImmediately();
+            }
+            updateFooterStatus(state.fabEnabled ? '已开启滑动悬浮按钮' : '已关闭滑动悬浮按钮');
+        });
+
+        dom.fabMidSelect.addEventListener('change', () => {
+            state.fabMidAction = dom.fabMidSelect.value === 'nearest_visible' ? 'nearest_visible' : 'jump_input';
+            try {
+                localStorage.setItem(FAB_MID_ACTION_STORAGE_KEY, state.fabMidAction);
+            } catch { /* ignore */ }
+            updateFabMidButton();
+            updateFooterStatus(state.fabMidAction === 'nearest_visible'
+                ? '悬浮中键：最近未隐藏楼层'
+                : '悬浮中键：输入楼层号跳转');
+        });
+
         dom.refreshBtn.addEventListener('click', () => {
             state.keptInHiddenTab.clear();
             rebuildFilteredList(false);
@@ -1145,6 +1276,145 @@
         });
     }
 
+    /** 更新悬浮按钮展开后的中键图标与提示 */
+    function updateFabMidButton() {
+        if (!dom.fabMid) return;
+        if (state.fabMidAction === 'nearest_visible') {
+            dom.fabMid.title = '抵达最近的未隐藏楼层';
+            dom.fabMid.innerHTML = '<i class="fa-regular fa-eye"></i>';
+        } else {
+            dom.fabMid.title = '输入楼层号跳转';
+            dom.fabMid.innerHTML = '<i class="fa-solid fa-hashtag"></i>';
+        }
+    }
+
+    function setFabExpanded(expanded) {
+        state.fabExpanded = Boolean(expanded);
+        if (!dom.fab || !dom.fabMain) return;
+        dom.fab.classList.toggle('fj_fab_expanded', state.fabExpanded);
+        dom.fabMain.innerHTML = state.fabExpanded
+            ? '<i class="fa-solid fa-xmark"></i>'
+            : '<i class="fa-solid fa-layer-group"></i>';
+        dom.fabMain.title = state.fabExpanded ? '收起快捷切楼' : '快捷切楼';
+        if (state.fabExpanded) {
+            showFabTemporarily(5000);
+        }
+    }
+
+    function hideFabImmediately() {
+        clearTimeout(state.fabHideTimer);
+        state.fabHideTimer = null;
+        state.fabExpanded = false;
+        if (dom.fab) {
+            dom.fab.classList.remove('fj_fab_visible', 'fj_fab_expanded');
+        }
+        if (dom.fabMain) {
+            dom.fabMain.innerHTML = '<i class="fa-solid fa-layer-group"></i>';
+        }
+    }
+
+    function showFabTemporarily(durationMs = 2600) {
+        if (!state.fabEnabled || state.isOpen || !dom.fab || !getChat().length) return;
+        dom.fab.classList.add('fj_fab_visible');
+        clearTimeout(state.fabHideTimer);
+        state.fabHideTimer = setTimeout(() => {
+            hideFabImmediately();
+        }, durationMs);
+    }
+
+    /** 创建滑动时浮现的快捷切楼单按钮（点击展开为：回顶 / 中键 / 回底） */
+    function createFab() {
+        if (document.getElementById('fj_fab')) return;
+
+        const fab = document.createElement('div');
+        fab.id = 'fj_fab';
+        fab.innerHTML = `
+            <div class="fj_fab_menu" id="fj_fab_menu">
+                <button type="button" class="fj_fab_btn" id="fj_fab_top" title="回到顶部 (#0)">
+                    <i class="fa-solid fa-angles-up"></i>
+                </button>
+                <button type="button" class="fj_fab_btn" id="fj_fab_mid" title="输入楼层号跳转">
+                    <i class="fa-solid fa-hashtag"></i>
+                </button>
+                <button type="button" class="fj_fab_btn" id="fj_fab_bottom" title="直达底部 (最新楼)">
+                    <i class="fa-solid fa-angles-down"></i>
+                </button>
+            </div>
+            <button type="button" class="fj_fab_btn fj_fab_main" id="fj_fab_main" title="快捷切楼">
+                <i class="fa-solid fa-layer-group"></i>
+            </button>
+        `;
+        document.body.appendChild(fab);
+
+        dom.fab = fab;
+        dom.fabMain = fab.querySelector('#fj_fab_main');
+        dom.fabTop = fab.querySelector('#fj_fab_top');
+        dom.fabMid = fab.querySelector('#fj_fab_mid');
+        dom.fabBottom = fab.querySelector('#fj_fab_bottom');
+        updateFabMidButton();
+
+        dom.fabMain.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setFabExpanded(!state.fabExpanded);
+        });
+
+        dom.fabTop.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setFabExpanded(false);
+            showFabTemporarily(2000);
+            jumpToFloor(0);
+        });
+
+        dom.fabMid.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setFabExpanded(false);
+            showFabTemporarily(2000);
+            if (state.fabMidAction === 'nearest_visible') {
+                jumpToNearestVisibleFloor();
+            } else {
+                promptJumpToFloor();
+            }
+        });
+
+        dom.fabBottom.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setFabExpanded(false);
+            showFabTemporarily(2000);
+            const chat = getChat();
+            if (chat.length) jumpToFloor(chat.length - 1);
+        });
+
+        // 点击外部空白处自动收起展开态
+        document.addEventListener('click', (e) => {
+            if (!state.fabExpanded) return;
+            if (e.target instanceof Element && e.target.closest('#fj_fab')) return;
+            setFabExpanded(false);
+            showFabTemporarily(1800);
+        });
+    }
+
+    /** 监听聊天区滚动（passive: true，不阻塞滚动帧率） */
+    function bindChatScrollForFab() {
+        const attach = () => {
+            const chatEl = document.getElementById('chat');
+            if (!chatEl || chatEl.dataset.fjScrollBound === '1') return Boolean(chatEl);
+            chatEl.dataset.fjScrollBound = '1';
+            chatEl.addEventListener('scroll', () => {
+                if (!state.fabEnabled || state.isOpen) return;
+                showFabTemporarily(state.fabExpanded ? 5000 : 2600);
+            }, { passive: true });
+            return true;
+        };
+
+        if (!attach()) {
+            let retries = 0;
+            const timer = setInterval(() => {
+                retries++;
+                if (attach() || retries >= 20) clearInterval(timer);
+            }, 300);
+        }
+    }
+
     /** 挂载魔术棒菜单入口 */
     function mountWandMenuButton() {
         if (document.getElementById('fj_wand_btn')) return true;
@@ -1201,6 +1471,8 @@
 
     function init() {
         createWindow();
+        createFab();
+        bindChatScrollForFab();
         bindSillyTavernEvents();
 
         if (!mountWandMenuButton()) {
