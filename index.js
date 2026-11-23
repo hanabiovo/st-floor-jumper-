@@ -391,40 +391,45 @@
         jumpToFloor(Number(cleaned));
     }
 
-    /** 跳转到离当前位置最近的未隐藏楼层 */
+    /** 跳转到离当前位置最近的「隐藏 / 未隐藏」楼层边界 */
     function jumpToNearestVisibleFloor() {
         const chat = getChat();
-        if (!chat.length) {
-            showNotice('当前没有聊天记录', { type: 'info' });
+        if (chat.length < 2) {
+            showNotice('当前聊天没有隐藏与未隐藏的边界', { type: 'info' });
+            return;
+        }
+
+        const boundaries = [];
+        for (let i = 1; i < chat.length; i++) {
+            const prevHidden = Boolean(chat[i - 1]?.is_system);
+            const currHidden = Boolean(chat[i]?.is_system);
+            if (prevHidden !== currHidden) {
+                boundaries.push(i);
+            }
+        }
+
+        if (!boundaries.length) {
+            showNotice('当前聊天没有隐藏与未隐藏的边界', { type: 'info' });
             return;
         }
 
         const current = Math.max(0, Math.min(chat.length - 1, getCurrentVisibleFloor()));
-        if (!chat[current]?.is_system) {
-            const mesEl = document.querySelector(`#chat .mes[mesid="${current}"]`);
-            if (mesEl instanceof HTMLElement) flashElement(mesEl);
-            showNotice(`当前 #${current} 已是未隐藏楼层`, { type: 'info' });
-            return;
-        }
 
-        let target = -1;
-        for (let offset = 1; offset < chat.length; offset++) {
-            const forward = current + offset;
-            if (forward < chat.length && chat[forward] && !chat[forward].is_system) {
-                target = forward;
-                break;
-            }
-            const backward = current - offset;
-            if (backward >= 0 && chat[backward] && !chat[backward].is_system) {
-                target = backward;
-                break;
+        // 若有多个边界且当前正好在某个边界上，则跳去下一个最近的边界；若只有一个边界则定位到该边界
+        const candidates = boundaries.length > 1
+            ? boundaries.filter((b) => b !== current)
+            : boundaries;
+
+        let target = candidates[0];
+        let bestDist = Math.abs(target - current);
+        for (let i = 1; i < candidates.length; i++) {
+            const dist = Math.abs(candidates[i] - current);
+            if (dist < bestDist) {
+                bestDist = dist;
+                target = candidates[i];
             }
         }
 
-        if (target === -1) {
-            showNotice('当前聊天没有未隐藏的楼层', { type: 'info' });
-            return;
-        }
         jumpToFloor(target);
     }
 
@@ -886,7 +891,7 @@
                     <label class="fj_setting_label" for="fj_fab_mid_select">悬浮展开中键功能</label>
                     <select id="fj_fab_mid_select" class="fj_setting_select">
                         <option value="jump_input" ${state.fabMidAction === 'jump_input' ? 'selected' : ''}>输入楼层号跳转</option>
-                        <option value="nearest_visible" ${state.fabMidAction === 'nearest_visible' ? 'selected' : ''}>抵达最近未隐藏楼层</option>
+                        <option value="nearest_visible" ${state.fabMidAction === 'nearest_visible' ? 'selected' : ''}>抵达最近隐藏边界</option>
                         <option value="open_panel" ${state.fabMidAction === 'open_panel' ? 'selected' : ''}>打开插件面板</option>
                     </select>
                 </div>
@@ -1060,7 +1065,7 @@
             updateFabMidButton();
             const labelMap = {
                 jump_input: '输入楼层号跳转',
-                nearest_visible: '最近未隐藏楼层',
+                nearest_visible: '最近隐藏边界',
                 open_panel: '打开插件面板',
             };
             updateFooterStatus(`悬浮中键：${labelMap[state.fabMidAction]}`);
@@ -1285,7 +1290,7 @@
     function updateFabMidButton() {
         if (!dom.fabMid) return;
         if (state.fabMidAction === 'nearest_visible') {
-            dom.fabMid.title = '抵达最近的未隐藏楼层';
+            dom.fabMid.title = '抵达最近的隐藏/未隐藏边界';
             dom.fabMid.innerHTML = '<i class="fa-regular fa-eye"></i>';
         } else if (state.fabMidAction === 'open_panel') {
             dom.fabMid.title = '打开楼层跳转面板';
