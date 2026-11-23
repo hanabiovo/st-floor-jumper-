@@ -1393,26 +1393,32 @@
         });
     }
 
-    /** 监听聊天区滚动（passive: true，不阻塞滚动帧率） */
+    /** 捕获聊天区滚动（兼容自定义主题更改滚动容器，passive: true 不阻塞滚动帧率） */
     function bindChatScrollForFab() {
-        const attach = () => {
+        if (document.documentElement.dataset.fjScrollBound === '1') return;
+        document.documentElement.dataset.fjScrollBound = '1';
+
+        const onScroll = (e) => {
+            if (!state.fabEnabled || state.isOpen) return;
+            const target = e.target;
             const chatEl = document.getElementById('chat');
-            if (!chatEl || chatEl.dataset.fjScrollBound === '1') return Boolean(chatEl);
-            chatEl.dataset.fjScrollBound = '1';
-            chatEl.addEventListener('scroll', () => {
-                if (!state.fabEnabled || state.isOpen) return;
-                showFabTemporarily(state.fabExpanded ? 5000 : 2600);
-            }, { passive: true });
-            return true;
+
+            const isChatArea = target === window
+                || target === document
+                || target === document.documentElement
+                || target === document.body
+                || (target instanceof Element && (
+                    target.id === 'chat'
+                    || target.id === 'sheld'
+                    || (chatEl && target.contains(chatEl))
+                ));
+
+            if (!isChatArea) return;
+            showFabTemporarily(state.fabExpanded ? 5000 : 2800);
         };
 
-        if (!attach()) {
-            let retries = 0;
-            const timer = setInterval(() => {
-                retries++;
-                if (attach() || retries >= 20) clearInterval(timer);
-            }, 300);
-        }
+        document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+        window.addEventListener('scroll', onScroll, { passive: true });
     }
 
     /** 挂载魔术棒菜单入口 */
