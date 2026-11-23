@@ -29,6 +29,7 @@
         rangeAnchorFloor: null,
         lastClickedFloor: null,
         selectedFloors: new Set(),
+        keptInHiddenTab: new Set(),
         filteredIndices: [],
         lastJumpedIndex: null,
         rafId: null,
@@ -330,6 +331,11 @@
                 }
                 msg.is_system = nextHidden;
 
+                // 在“已隐藏”分类下取消隐藏时，临时保留在当前列表中防误触
+                if (state.filter === 'hidden' && !nextHidden) {
+                    state.keptInHiddenTab.add(idx);
+                }
+
                 const mesEl = document.querySelector(`#chat .mes[mesid="${idx}"]`);
                 if (mesEl instanceof HTMLElement) {
                     mesEl.setAttribute('is_system', String(nextHidden));
@@ -450,7 +456,7 @@
             if (state.filter === 'user' && !msg.is_user) continue;
             if (state.filter === 'bot' && msg.is_user) continue;
             if (state.filter === 'bookmark' && !Object.prototype.hasOwnProperty.call(bookmarks, String(i))) continue;
-            if (state.filter === 'hidden' && !isHidden) continue;
+            if (state.filter === 'hidden' && !isHidden && !state.keptInHiddenTab.has(i)) continue;
 
             if (q) {
                 const floorMatch = isPureNumber && String(i).includes(numericQuery);
@@ -626,6 +632,7 @@
         dom.win.classList.toggle('fj_hidden', !nextOpen);
 
         if (nextOpen) {
+            state.keptInHiddenTab.clear();
             clampWindowToViewport();
             rebuildFilteredList(false);
             updateFooterStatus('就绪');
@@ -878,6 +885,7 @@
     function bindWindowEvents() {
         dom.closeBtn.addEventListener('click', () => toggleWindow(false));
         dom.refreshBtn.addEventListener('click', () => {
+            state.keptInHiddenTab.clear();
             rebuildFilteredList(false);
             updateFooterStatus('已刷新');
         });
@@ -1001,6 +1009,7 @@
             if (!nextFilter || nextFilter === state.filter) return;
 
             state.filter = nextFilter;
+            state.keptInHiddenTab.clear();
             dom.tabs.querySelectorAll('.fj_tab').forEach((el) => {
                 el.classList.toggle('fj_active', el === btn);
             });
@@ -1124,6 +1133,7 @@
         const onChatChanged = () => {
             state.lastJumpedIndex = null;
             state.selectedFloors.clear();
+            state.keptInHiddenTab.clear();
             state.rangeAnchorFloor = null;
             state.lastClickedFloor = null;
             if (state.isOpen) rebuildFilteredList(true);
