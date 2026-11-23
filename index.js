@@ -145,8 +145,8 @@
         setTimeout(() => el.classList.remove('fj_jump_flash'), 1600);
     }
 
-    /** 直接滚动到已渲染的 DOM 元素 */
-    function scrollToRenderedFloor(index) {
+    /** 直接滚动到已渲染的 DOM 元素（长距离或刚加载历史时用 instant，防止半路中断） */
+    function scrollToRenderedFloor(index, { instant = false, flash = true } = {}) {
         const chatEl = document.getElementById('chat');
         const mesEl = document.querySelector(`#chat .mes[mesid="${index}"]`);
         if (!(chatEl instanceof HTMLElement) || !(mesEl instanceof HTMLElement)) {
@@ -154,14 +154,48 @@
         }
         const elementRect = mesEl.getBoundingClientRect();
         const containerRect = chatEl.getBoundingClientRect();
-        const targetTop = elementRect.top - containerRect.top + chatEl.scrollTop;
+        const delta = elementRect.top - containerRect.top;
+        const targetTop = Math.max(0, delta + chatEl.scrollTop);
 
+        const useInstant = instant || Math.abs(delta) > 2500;
         chatEl.scrollTo({
-            top: Math.max(0, targetTop),
-            behavior: 'smooth',
+            top: targetTop,
+            behavior: useInstant ? 'instant' : 'smooth',
         });
-        flashElement(mesEl);
+        if (flash) {
+            flashElement(mesEl);
+        }
         return true;
+    }
+
+    /** 跳转后短时校准位置（防止头像/图片异步加载或内置 smooth 滚动导致停在半路） */
+    function schedulePositionSettle(index, delays) {
+        const chatEl = document.getElementById('chat');
+        if (!(chatEl instanceof HTMLElement)) return;
+
+        let cancelled = false;
+        const cancel = () => { cancelled = true; };
+        chatEl.addEventListener('touchstart', cancel, { once: true, passive: true });
+        chatEl.addEventListener('wheel', cancel, { once: true, passive: true });
+        chatEl.addEventListener('pointerdown', cancel, { once: true, passive: true });
+
+        delays.forEach((ms) => {
+            setTimeout(() => {
+                if (cancelled) return;
+                const mesEl = document.querySelector(`#chat .mes[mesid="${index}"]`);
+                if (!(mesEl instanceof HTMLElement)) return;
+                const delta = mesEl.getBoundingClientRect().top - chatEl.getBoundingClientRect().top;
+                if (Math.abs(delta) > 40) {
+                    scrollToRenderedFloor(index, { instant: true, flash: false });
+                }
+            }, ms);
+        });
+
+        setTimeout(() => {
+            chatEl.removeEventListener('touchstart', cancel);
+            chatEl.removeEventListener('wheel', cancel);
+            chatEl.removeEventListener('pointerdown', cancel);
+        }, Math.max(...delays) + 100);
     }
 
     /** 等待浏览器把加载提示真正合成并绘制到屏幕上，再开始重渲染 */
@@ -233,8 +267,9 @@
                 toggleWindow(false);
             }
 
-            // 1. 已渲染在页面中：直接平滑滚动，零开销
+            // 1. 已渲染在页面中：近距离平滑、长距离直达，并做一次轻量校准
             if (alreadyRendered && scrollToRenderedFloor(index)) {
+                schedulePositionSettle(index, [220]);
                 updateFooterStatus(`已定位到 #${index}`);
                 showNotice(`已跳转到 #${index}`);
                 return;
@@ -250,7 +285,9 @@
                 await ctx.executeSlashCommandsWithOptions(`/chat-jump ${index}`, {
                     handleExecutionErrors: false,
                 });
-                if (scrollToRenderedFloor(index)) {
+                // 覆盖内置的 smooth 滚动，用 instant 精准落位，并在图片/布局稳定后二次校准
+                if (scrollToRenderedFloor(index, { instant: true })) {
+                    schedulePositionSettle(index, [180, 450]);
                     updateFooterStatus(`已加载并定位到 #${index}`);
                     showNotice(`已跳转到 #${index}`);
                     return;
@@ -263,7 +300,8 @@
                 if (!loadMoreBtn) break;
                 loadMoreBtn.click();
                 await new Promise(r => setTimeout(r, 120));
-                if (scrollToRenderedFloor(index)) {
+                if (scrollToRenderedFloor(index, { instant: true })) {
+                    schedulePositionSettle(index, [180, 450]);
                     updateFooterStatus(`已加载并定位到 #${index}`);
                     showNotice(`已跳转到 #${index}`);
                     return;
