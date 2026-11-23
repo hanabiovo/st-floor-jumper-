@@ -7,6 +7,10 @@
     const AUTO_CLOSE_STORAGE_KEY = 'st_floor_jumper_auto_close';
     const FAB_ENABLED_STORAGE_KEY = 'st_floor_jumper_fab_enabled';
     const FAB_MID_ACTION_STORAGE_KEY = 'st_floor_jumper_fab_mid_action';
+    const FAB_POS_STORAGE_KEY = 'st_floor_jumper_fab_pos';
+    const FAB_HIDE_DELAY_MS = 1300;
+    const FAB_EXPANDED_HIDE_DELAY_MS = 2800;
+    const FAB_LONG_PRESS_MS = 320;
     const ROW_HEIGHT = 58;
     const OVERSCAN = 6;
     const PREVIEW_MAX_LEN = 72;
@@ -40,6 +44,9 @@
         fabMidAction: loadStrPref(FAB_MID_ACTION_STORAGE_KEY, ['jump_input', 'nearest_visible', 'open_panel'], 'jump_input'),
         fabExpanded: false,
         fabHideTimer: null,
+        fabDragging: false,
+        lastUserScrollIntentAt: 0,
+        lastScrollTop: null,
         batchMode: false,
         rangeMode: false,
         rangeAnchorFloor: null,
@@ -1308,9 +1315,9 @@
         dom.fabMain.innerHTML = state.fabExpanded
             ? '<i class="fa-solid fa-xmark"></i>'
             : '<i class="fa-solid fa-sort"></i>';
-        dom.fabMain.title = state.fabExpanded ? '收起快捷切楼' : '快捷切楼';
+        dom.fabMain.title = state.fabExpanded ? '收起快捷切楼' : '快捷切楼（长按可拖动）';
         if (state.fabExpanded) {
-            showFabTemporarily(5000);
+            showFabTemporarily(FAB_EXPANDED_HIDE_DELAY_MS);
         }
     }
 
@@ -1319,23 +1326,65 @@
         state.fabHideTimer = null;
         state.fabExpanded = false;
         if (dom.fab) {
-            dom.fab.classList.remove('fj_fab_visible', 'fj_fab_expanded');
+            dom.fab.classList.remove('fj_fab_visible', 'fj_fab_expanded', 'fj_fab_dragging');
         }
         if (dom.fabMain) {
             dom.fabMain.innerHTML = '<i class="fa-solid fa-sort"></i>';
         }
     }
 
-    function showFabTemporarily(durationMs = 2600) {
-        if (!state.fabEnabled || state.isOpen || !dom.fab || !getChat().length) return;
-        dom.fab.classList.add('fj_fab_visible');
-        clearTimeout(state.fabHideTimer);
-        state.fabHideTimer = setTimeout(() => {
-            hideFabImmediately();
-        }, durationMs);
+    function getFabHostRect() {
+        const host = dom.fab?.parentElement;
+        if (host && host !== document.body) {
+            return host.getBoundingClientRect();
+        }
+        return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
     }
 
-    /** 创建滑动时浮现的快捷切楼单按钮（点击展开为：回顶 / 中键 / 回底） */
+    function clampFabPosition(right, bottom) {
+        const rect = getFabHostRect();
+        const maxRight = Math.max(8, rect.width - 50);
+        const maxBottom = Math.max(16, rect.height - 56);
+        return {
+            right: Math.round(Math.max(8, Math.min(maxRight, right))),
+            bottom: Math.round(Math.max(16, Math.min(maxBottom, bottom))),
+        };
+    }
+
+    function applyFabPosition(right, bottom) {
+        if (!dom.fab) return;
+        const pos = clampFabPosition(right, bottom);
+        dom.fab.style.right = `${pos.right}px`;
+        dom.fab.style.bottom = `${pos.bottom}px`;
+        return pos;
+    }
+
+    function restoreFabPosition() {
+        if (!dom.fab) return;
+        try {
+            const saved = JSON.parse(localStorage.getItem(FAB_POS_STORAGE_KEY) || 'null');
+            if (saved && Number.isFinite(saved.right) && Number.isFinite(saved.bottom)) {
+                applyFabPosition(saved.right, saved.bottom);
+            }
+        } catch { /* ignore */ }
+    }
+
+    function showFabTemporarily(durationMs = FAB_HIDE_DELAY_MS) {
+        if (!state.fabEnabled || state.isOpen || !dom.fab || !getChat().length) return;
+        // 每次显示前做一次边界保护，防止切屏后越界
+        if (dom.fab.style.right && dom.fab.style.bottom) {
+            applyFabPosition(parseFloat(dom.fab.style.right), parseFloat(dom.fab.style.bottom));
+        }
+        dom.fab.classList.add('fj_fab_visible');
+        clearTimeout(state.fabHideTimer);
+        if (!state.fabDragging) {
+            state.fabHideTimer = setTimeout(() => {
+                hideFabImmediately();
+            }, durationMs);
+        }
+    }
+
+    /** 创建滑动时浮现的快捷切楼单按钮（单击即时展开，长按自由拖动） */
     function createFab() {
         if (document.getElementById('fj_fab')) return;
 
@@ -1353,7 +1402,7 @@
                     <i class="fa-solid fa-angles-down"></i>
                 </button>
             </div>
-            <button type="button" class="fj_fab_btn fj_fab_main" id="fj_fab_main" title="快捷切楼">
+            <button type="button" class="fj_fab_btn fj_fab_main" id="fj_fab_main" title="快捷切楼（长按可拖动）">
                 <i class="fa-solid fa-sort"></i>
             </button>
         `;
@@ -1366,61 +1415,204 @@
         dom.fabMid = fab.querySelector('#fj_fab_mid');
         dom.fabBottom = fab.querySelector('#fj_fab_bottom');
         updateFabMidButton();
+        restoreFabPosition();
 
-        dom.fabMain.addEventListener('click', (e) => {
+        // 主按钮：使用 pointerdown/pointerup 实现“滚动中随时即时展开 + 长按自由拖动”
+        let pressTimer = null;
+        let pointerActive = false;
+        let activePointerId = null;
+        let startX = 0;
+        let startY = 0;
+        let startRight = 18;
+        let startBottom = 84;
+        let movedTooFar = false;
+
+        const resetPress = () => {
+            clearTimeout(pressTimer);
+            pressTimer = null;
+            pointerActive = false;
+            activePointerId = null;
+            if (state.fabDragging) {
+                state.fabDragging = false;
+                fab.classList.remove('fj_fab_dragging');
+                try {
+                    localStorage.setItem(FAB_POS_STORAGE_KEY, JSON.stringify({
+                        right: parseFloat(fab.style.right) || 18,
+                        bottom: parseFloat(fab.style.bottom) || 84,
+                    }));
+                } catch { /* ignore */ }
+                showFabTemporarily(FAB_HIDE_DELAY_MS);
+            }
+        };
+
+        dom.fabMain.addEventListener('pointerdown', (e) => {
+            if (!e.isPrimary) return;
             e.stopPropagation();
-            setFabExpanded(!state.fabExpanded);
+            clearTimeout(state.fabHideTimer);
+
+            pointerActive = true;
+            activePointerId = e.pointerId;
+            movedTooFar = false;
+            startX = e.clientX;
+            startY = e.clientY;
+
+            const hostRect = getFabHostRect();
+            const fabRect = fab.getBoundingClientRect();
+            startRight = hostRect.left + hostRect.width - fabRect.right;
+            startBottom = hostRect.top + hostRect.height - fabRect.bottom;
+
+            dom.fabMain.setPointerCapture?.(e.pointerId);
+
+            clearTimeout(pressTimer);
+            pressTimer = setTimeout(() => {
+                if (!pointerActive || movedTooFar) return;
+                state.fabDragging = true;
+                if (state.fabExpanded) {
+                    setFabExpanded(false);
+                }
+                clearTimeout(state.fabHideTimer);
+                fab.classList.add('fj_fab_dragging');
+                navigator.vibrate?.(15);
+            }, FAB_LONG_PRESS_MS);
         });
 
-        dom.fabTop.addEventListener('click', (e) => {
-            e.stopPropagation();
-            setFabExpanded(false);
-            showFabTemporarily(2000);
-            jumpToFloor(0);
-        });
+        dom.fabMain.addEventListener('pointermove', (e) => {
+            if (!pointerActive || e.pointerId !== activePointerId) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
 
-        dom.fabMid.addEventListener('click', (e) => {
-            e.stopPropagation();
-            setFabExpanded(false);
-            if (state.fabMidAction === 'open_panel') {
-                toggleWindow(true);
+            if (!state.fabDragging) {
+                if (Math.hypot(dx, dy) > 10) {
+                    movedTooFar = true;
+                    clearTimeout(pressTimer);
+                }
                 return;
             }
-            showFabTemporarily(2000);
-            if (state.fabMidAction === 'nearest_visible') {
+
+            e.preventDefault();
+            applyFabPosition(startRight - dx, startBottom - dy);
+        });
+
+        dom.fabMain.addEventListener('pointerup', (e) => {
+            if (!pointerActive || e.pointerId !== activePointerId) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            const wasDragging = state.fabDragging;
+            const shouldToggle = !wasDragging && !movedTooFar;
+            resetPress();
+
+            if (shouldToggle) {
+                setFabExpanded(!state.fabExpanded);
+                if (!state.fabExpanded) {
+                    showFabTemporarily(FAB_HIDE_DELAY_MS);
+                }
+            }
+        });
+
+        dom.fabMain.addEventListener('pointercancel', () => {
+            resetPress();
+        });
+
+        // 阻止 pointerup 后重复触发默认 click
+        dom.fabMain.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+
+        // 子按钮同样用 pointerup 即时响应，避免滚动惯性吞掉点击
+        const bindSubBtn = (btn, handler) => {
+            btn.addEventListener('pointerdown', (e) => {
+                e.stopPropagation();
+                clearTimeout(state.fabHideTimer);
+            });
+            btn.addEventListener('pointerup', (e) => {
+                if (!e.isPrimary) return;
+                e.preventDefault();
+                e.stopPropagation();
+                setFabExpanded(false);
+                showFabTemporarily(1000);
+                handler();
+            });
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+        };
+
+        bindSubBtn(dom.fabTop, () => jumpToFloor(0));
+        bindSubBtn(dom.fabMid, () => {
+            if (state.fabMidAction === 'open_panel') {
+                hideFabImmediately();
+                toggleWindow(true);
+            } else if (state.fabMidAction === 'nearest_visible') {
                 jumpToNearestVisibleFloor();
             } else {
                 promptJumpToFloor();
             }
         });
-
-        dom.fabBottom.addEventListener('click', (e) => {
-            e.stopPropagation();
-            setFabExpanded(false);
-            showFabTemporarily(2000);
+        bindSubBtn(dom.fabBottom, () => {
             const chat = getChat();
             if (chat.length) jumpToFloor(chat.length - 1);
         });
 
         // 点击外部空白处自动收起展开态
-        document.addEventListener('click', (e) => {
+        document.addEventListener('pointerdown', (e) => {
             if (!state.fabExpanded) return;
             if (e.target instanceof Element && e.target.closest('#fj_fab')) return;
             setFabExpanded(false);
-            showFabTemporarily(1800);
-        });
+            showFabTemporarily(FAB_HIDE_DELAY_MS);
+        }, { passive: true });
     }
 
-    /** 捕获聊天区滚动（兼容自定义主题更改滚动容器，passive: true 不阻塞滚动帧率） */
+    /** 仅在用户主动手动滚动聊天区时触发悬浮按钮（过滤流式输出/高度变化导致的被动滚动） */
     function bindChatScrollForFab() {
         if (document.documentElement.dataset.fjScrollBound === '1') return;
         document.documentElement.dataset.fjScrollBound = '1';
 
-        const onScroll = (e) => {
+        const isInsideChatOrShell = (target) => {
+            if (!(target instanceof Element)) return true;
+            if (target.closest('#fj_window, #fj_fab, .drawer-content, .popup, .modal')) return false;
+            const chatEl = document.getElementById('chat');
+            const sheldEl = document.getElementById('sheld');
+            return Boolean(
+                (chatEl && (target === chatEl || chatEl.contains(target) || target.contains(chatEl)))
+                || (sheldEl && (target === sheldEl || sheldEl.contains(target)))
+            );
+        };
+
+        const markUserScrollIntent = (e) => {
             if (!state.fabEnabled || state.isOpen) return;
+            if (!isInsideChatOrShell(e.target)) return;
+            state.lastUserScrollIntentAt = Date.now();
+        };
+
+        // 鼠标滚轮、手机手指滑动、拖动滚动条
+        document.addEventListener('wheel', markUserScrollIntent, { capture: true, passive: true });
+        document.addEventListener('touchmove', markUserScrollIntent, { capture: true, passive: true });
+        document.addEventListener('pointerdown', (e) => {
+            if (e.target instanceof Element && (e.target.id === 'chat' || e.target.id === 'sheld')) {
+                markUserScrollIntent(e);
+            }
+        }, { capture: true, passive: true });
+
+        // 键盘翻页键
+        document.addEventListener('keydown', (e) => {
+            if (!state.fabEnabled || state.isOpen) return;
+            const tag = document.activeElement?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
+            if (['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' '].includes(e.key)) {
+                state.lastUserScrollIntentAt = Date.now();
+            }
+        }, { passive: true });
+
+        const onScroll = (e) => {
+            if (!state.fabEnabled || state.isOpen || state.isJumping || state.fabDragging) return;
+            // 仅放行用户主动交互后 600ms 内产生的滚动，拦截高度变化或自动滚底
+            if (Date.now() - state.lastUserScrollIntentAt > 600) return;
+
             const target = e.target;
             const chatEl = document.getElementById('chat');
-
             const isChatArea = target === window
                 || target === document
                 || target === document.documentElement
@@ -1430,9 +1622,17 @@
                     || target.id === 'sheld'
                     || (chatEl && target.contains(chatEl))
                 ));
-
             if (!isChatArea) return;
-            showFabTemporarily(state.fabExpanded ? 5000 : 2800);
+
+            const currentTop = target === window
+                ? window.scrollY
+                : (target === document ? document.documentElement.scrollTop : target.scrollTop);
+            if (state.lastScrollTop !== null && Math.abs(currentTop - state.lastScrollTop) < 2) {
+                return;
+            }
+            state.lastScrollTop = currentTop;
+
+            showFabTemporarily(state.fabExpanded ? FAB_EXPANDED_HIDE_DELAY_MS : FAB_HIDE_DELAY_MS);
         };
 
         document.addEventListener('scroll', onScroll, { capture: true, passive: true });

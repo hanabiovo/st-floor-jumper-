@@ -706,6 +706,8 @@ body > #fj_fab {
     cursor: pointer;
     padding: 0;
     font-size: 0.95em;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
     transition: transform 0.12s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
@@ -721,11 +723,24 @@ body > #fj_fab {
 .fj_fab_main {
     width: 40px;
     height: 40px;
+    touch-action: none;
 }
 
 #fj_fab.fj_fab_expanded .fj_fab_main {
     border-color: var(--SmartThemeQuoteColor);
     color: var(--SmartThemeQuoteColor);
+}
+
+#fj_fab.fj_fab_dragging {
+    transition: none !important;
+}
+
+#fj_fab.fj_fab_dragging .fj_fab_main {
+    transform: scale(1.12);
+    border-color: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeQuoteColor);
+    box-shadow: 0 6px 18px var(--SmartThemeShadowColor);
+    cursor: grabbing;
 }
 
 /* 跳转后的临时高亮效果（作为兜底） */
