@@ -20,16 +20,22 @@
 
     const state = {
         isOpen: false,
-        filter: 'all',      // 'all' | 'user' | 'bot' | 'bookmark'
+        filter: 'all',      // 'all' | 'user' | 'bot' | 'bookmark' | 'hidden'
         query: '',
         reverseOrder: false,
         autoClose: loadAutoClosePref(),
+        batchMode: false,
+        rangeMode: false,
+        rangeAnchorFloor: null,
+        lastClickedFloor: null,
+        selectedFloors: new Set(),
         filteredIndices: [],
         lastJumpedIndex: null,
         rafId: null,
         searchTimer: null,
         noticeTimer: null,
         isJumping: false,
+        isUpdatingVisibility: false,
     };
 
     /** @type {Record<string, HTMLElement | null>} */
@@ -295,6 +301,133 @@
         jumpToFloor(target);
     }
 
+    /** 快捷/批量隐藏或显示楼层（直接复用酒馆原生状态并单次保存，零卡顿） */
+    async function setFloorsHidden(floorIndices, hide) {
+        const ctx = getContext();
+        const chat = getChat();
+        if (!ctx || !chat.length || !floorIndices.length || state.isUpdatingVisibility) return;
+
+        state.isUpdatingVisibility = true;
+        try {
+            const uniqueValid = [];
+            const seen = new Set();
+            for (let i = 0; i < floorIndices.length; i++) {
+                const idx = Number(floorIndices[i]);
+                if (!Number.isInteger(idx) || idx < 0 || idx >= chat.length || seen.has(idx)) continue;
+                seen.add(idx);
+                uniqueValid.push(idx);
+            }
+            if (!uniqueValid.length) return;
+
+            let changed = 0;
+            for (let i = 0; i < uniqueValid.length; i++) {
+                const idx = uniqueValid[i];
+                const msg = chat[idx];
+                if (!msg) continue;
+                const nextHidden = Boolean(hide);
+                if (Boolean(msg.is_system) !== nextHidden) {
+                    changed++;
+                }
+                msg.is_system = nextHidden;
+
+                const mesEl = document.querySelector(`#chat .mes[mesid="${idx}"]`);
+                if (mesEl instanceof HTMLElement) {
+                    mesEl.setAttribute('is_system', String(nextHidden));
+                }
+            }
+
+            ctx.swipe?.refresh?.();
+            await ctx.saveChat?.();
+
+            const actionLabel = hide ? '隐藏' : '显示';
+            const noticeText = uniqueValid.length === 1
+                ? `已${actionLabel} #${uniqueValid[0]}`
+                : (changed > 0
+                    ? `已${actionLabel} ${uniqueValid.length} 个楼层`
+                    : `所选 ${uniqueValid.length} 个楼层均已是${actionLabel}状态`);
+
+            updateFooterStatus(noticeText);
+            showNotice(noticeText);
+            rebuildFilteredList(false);
+        } finally {
+            state.isUpdatingVisibility = false;
+        }
+    }
+
+    /** 按当前列表顺序连选两个楼层之间的所有楼层 */
+    function selectRangeBetween(floorA, floorB) {
+        const list = state.filteredIndices;
+        const posA = list.indexOf(floorA);
+        const posB = list.indexOf(floorB);
+
+        if (posA !== -1 && posB !== -1) {
+            const start = Math.min(posA, posB);
+            const end = Math.max(posA, posB);
+            for (let p = start; p <= end; p++) {
+                state.selectedFloors.add(list[p]);
+            }
+            return end - start + 1;
+        }
+
+        const minFloor = Math.min(floorA, floorB);
+        const maxFloor = Math.max(floorA, floorB);
+        let added = 0;
+        for (let p = 0; p < list.length; p++) {
+            const f = list[p];
+            if (f >= minFloor && f <= maxFloor) {
+                state.selectedFloors.add(f);
+                added++;
+            }
+        }
+        return added;
+    }
+
+    function setBatchMode(enabled) {
+        state.batchMode = Boolean(enabled);
+        if (!state.batchMode) {
+            state.rangeMode = false;
+            state.rangeAnchorFloor = null;
+            state.lastClickedFloor = null;
+            state.selectedFloors.clear();
+        }
+        updateBatchUI();
+        renderVisibleRows();
+    }
+
+    function updateBatchUI() {
+        if (!dom.batchToggle || !dom.batchBar) return;
+
+        const count = state.selectedFloors.size;
+        dom.batchToggle.classList.toggle('fj_active', state.batchMode);
+        dom.batchBar.classList.toggle('fj_hidden', !state.batchMode);
+
+        if (dom.rangeBtn) {
+            dom.rangeBtn.classList.toggle('fj_active', state.rangeMode);
+        }
+        if (dom.batchHideBtn) {
+            dom.batchHideBtn.disabled = count === 0;
+            dom.batchHideBtn.innerHTML = `<i class="fa-solid fa-eye-slash"></i><span>隐藏${count ? ` (${count})` : ''}</span>`;
+        }
+        if (dom.batchShowBtn) {
+            dom.batchShowBtn.disabled = count === 0;
+            dom.batchShowBtn.innerHTML = `<i class="fa-regular fa-eye"></i><span>显示${count ? ` (${count})` : ''}</span>`;
+        }
+        if (dom.batchClearBtn) {
+            dom.batchClearBtn.disabled = count === 0;
+        }
+        if (dom.batchHint) {
+            if (state.rangeMode) {
+                dom.batchHint.textContent = state.rangeAnchorFloor === null
+                    ? '连选模式：先点起始楼层，再点终点楼层'
+                    : `连选起点 #${state.rangeAnchorFloor}，请点击终点楼层`;
+            } else {
+                dom.batchHint.textContent = count > 0
+                    ? `已选 ${count} 楼 · 可继续点选或切连选`
+                    : '点击楼层勾选，桌面端支持 Shift 连选';
+            }
+        }
+    }
+
     /** 重建筛选后的楼层索引数组（仅存数字索引，内存极小） */
     function rebuildFilteredList(resetScroll = false) {
         if (!state.isOpen) return;
@@ -306,13 +439,18 @@
         const isPureNumber = numericQuery !== '' && /^\d+$/.test(numericQuery);
 
         const result = [];
+        let hiddenCount = 0;
         for (let i = 0; i < chat.length; i++) {
             const msg = chat[i];
             if (!msg) continue;
 
+            const isHidden = Boolean(msg.is_system);
+            if (isHidden) hiddenCount++;
+
             if (state.filter === 'user' && !msg.is_user) continue;
-            if (state.filter === 'bot' && (msg.is_user || msg.is_system)) continue;
+            if (state.filter === 'bot' && msg.is_user) continue;
             if (state.filter === 'bookmark' && !Object.prototype.hasOwnProperty.call(bookmarks, String(i))) continue;
+            if (state.filter === 'hidden' && !isHidden) continue;
 
             if (q) {
                 const floorMatch = isPureNumber && String(i).includes(numericQuery);
@@ -331,10 +469,20 @@
 
         state.filteredIndices = result;
 
+        // 清理已越界的选中项
+        if (state.selectedFloors.size > 0) {
+            for (const f of state.selectedFloors) {
+                if (f < 0 || f >= chat.length) state.selectedFloors.delete(f);
+            }
+        }
+
         // 更新顶部统计与输入框范围提示
         const bookmarkCount = Object.keys(bookmarks).length;
         if (dom.stats) {
-            dom.stats.textContent = `共 ${chat.length} 楼 · 书签 ${bookmarkCount}`;
+            const parts = [`共${chat.length}楼`];
+            if (hiddenCount > 0) parts.push(`隐${hiddenCount}`);
+            if (bookmarkCount > 0) parts.push(`签${bookmarkCount}`);
+            dom.stats.textContent = parts.join(' · ');
         }
         if (dom.jumpInput) {
             dom.jumpInput.max = String(Math.max(0, chat.length - 1));
@@ -352,6 +500,7 @@
             dom.viewport.scrollTop = 0;
         }
 
+        updateBatchUI();
         renderVisibleRows();
     }
 
@@ -386,20 +535,36 @@
             if (!msg) continue;
 
             const isUser = Boolean(msg.is_user);
+            const isHidden = Boolean(msg.is_system);
+            const isSelected = state.batchMode && state.selectedFloors.has(floorIndex);
+            const isAnchor = state.batchMode && state.rangeMode && state.rangeAnchorFloor === floorIndex;
             const sender = escapeHtml(msg.name || (isUser ? 'User' : 'Character'));
             const preview = escapeHtml(toPlainPreview(msg.mes));
             const starred = isBookmarked(floorIndex);
             const note = starred ? escapeHtml(getBookmarkNote(floorIndex)) : '';
 
+            const rowClasses = [
+                'fj_item',
+                isUser ? 'fj_is_user' : 'fj_is_bot',
+                isHidden ? 'fj_is_hidden' : '',
+                isSelected ? 'fj_is_selected' : '',
+                isAnchor ? 'fj_is_range_anchor' : '',
+            ].filter(Boolean).join(' ');
+
             html += `
-                <div class="fj_item ${isUser ? 'fj_is_user' : 'fj_is_bot'}" data-floor="${floorIndex}">
+                <div class="${rowClasses}" data-floor="${floorIndex}">
                     <div class="fj_item_top">
                         <div class="fj_item_meta">
+                            ${state.batchMode ? `<span class="fj_select_box"><i class="${isSelected ? 'fa-solid fa-square-check' : 'fa-regular fa-square'}"></i></span>` : ''}
                             <span class="fj_floor_badge">#${floorIndex}</span>
                             <span class="fj_sender" title="${sender}">${sender}</span>
+                            ${isHidden ? '<span class="fj_hidden_tag">已隐藏</span>' : ''}
                             ${note ? `<span class="fj_bookmark_note" title="${note}">· ${note}</span>` : ''}
                         </div>
                         <div class="fj_item_actions">
+                            <button type="button" class="fj_icon_btn fj_hide_btn ${isHidden ? 'fj_hidden_state' : ''}" data-action="hide" data-floor="${floorIndex}" title="${isHidden ? '取消隐藏此楼' : '隐藏此楼'}">
+                                <i class="${isHidden ? 'fa-solid fa-eye-slash' : 'fa-regular fa-eye'}"></i>
+                            </button>
                             ${starred ? `<button type="button" class="fj_icon_btn fj_note_btn" data-action="note" data-floor="${floorIndex}" title="编辑书签备注"><i class="fa-solid fa-pen"></i></button>` : ''}
                             <button type="button" class="fj_icon_btn fj_star_btn ${starred ? 'fj_bookmarked' : ''}" data-action="star" data-floor="${floorIndex}" title="${starred ? '取消书签' : '添加书签'}">
                                 <i class="${starred ? 'fa-solid' : 'fa-regular'} fa-star"></i>
@@ -609,11 +774,46 @@
                         <button type="button" class="fj_tab" data-filter="user">用户</button>
                         <button type="button" class="fj_tab" data-filter="bot">角色</button>
                         <button type="button" class="fj_tab" data-filter="bookmark">书签</button>
+                        <button type="button" class="fj_tab" data-filter="hidden">已隐藏</button>
                     </div>
-                    <label class="fj_auto_close_label" title="点击跳转后自动收起本窗口">
-                        <input type="checkbox" id="fj_auto_close_cb" ${state.autoClose ? 'checked' : ''} />
-                        <span>跳后收起</span>
-                    </label>
+                    <div class="fj_filter_right">
+                        <button type="button" class="fj_batch_toggle" id="fj_batch_toggle" title="批量多选隐藏或显示楼层">
+                            <i class="fa-regular fa-square-check"></i>
+                            <span>多选</span>
+                        </button>
+                        <label class="fj_auto_close_label" title="点击跳转后自动收起本窗口">
+                            <input type="checkbox" id="fj_auto_close_cb" ${state.autoClose ? 'checked' : ''} />
+                            <span>跳后收起</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="fj_batch_bar fj_hidden" id="fj_batch_bar">
+                    <div class="fj_batch_row">
+                        <div class="fj_batch_group">
+                            <button type="button" class="fj_batch_btn" id="fj_range_btn" title="开启后依次点击起止两楼自动连选中间所有楼层">
+                                <i class="fa-solid fa-arrows-left-right-to-line"></i>
+                                <span>连选</span>
+                            </button>
+                            <button type="button" class="fj_batch_btn" id="fj_batch_all_btn" title="全选当前筛选结果中的所有楼层">
+                                <span>全选</span>
+                            </button>
+                            <button type="button" class="fj_batch_btn" id="fj_batch_clear_btn" title="清空已选楼层" disabled>
+                                <span>清空</span>
+                            </button>
+                        </div>
+                        <div class="fj_batch_group">
+                            <button type="button" class="fj_batch_btn fj_batch_btn_accent" id="fj_batch_hide_btn" disabled>
+                                <i class="fa-solid fa-eye-slash"></i>
+                                <span>隐藏</span>
+                            </button>
+                            <button type="button" class="fj_batch_btn fj_batch_btn_accent" id="fj_batch_show_btn" disabled>
+                                <i class="fa-regular fa-eye"></i>
+                                <span>显示</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="fj_batch_hint" id="fj_batch_hint">点击楼层勾选，桌面端支持 Shift 连选</div>
                 </div>
             </div>
 
@@ -655,6 +855,14 @@
         dom.searchInput = win.querySelector('#fj_search_input');
         dom.searchClear = win.querySelector('#fj_search_clear');
         dom.tabs = win.querySelector('#fj_tabs');
+        dom.batchToggle = win.querySelector('#fj_batch_toggle');
+        dom.batchBar = win.querySelector('#fj_batch_bar');
+        dom.rangeBtn = win.querySelector('#fj_range_btn');
+        dom.batchAllBtn = win.querySelector('#fj_batch_all_btn');
+        dom.batchClearBtn = win.querySelector('#fj_batch_clear_btn');
+        dom.batchHideBtn = win.querySelector('#fj_batch_hide_btn');
+        dom.batchShowBtn = win.querySelector('#fj_batch_show_btn');
+        dom.batchHint = win.querySelector('#fj_batch_hint');
         dom.autoCloseCb = win.querySelector('#fj_auto_close_cb');
         dom.viewport = win.querySelector('#fj_list_viewport');
         dom.spacer = win.querySelector('#fj_list_spacer');
@@ -736,6 +944,55 @@
             } catch { /* ignore */ }
         });
 
+        // 多选模式开关与批量操作栏
+        dom.batchToggle.addEventListener('click', () => {
+            setBatchMode(!state.batchMode);
+        });
+
+        dom.rangeBtn.addEventListener('click', () => {
+            state.rangeMode = !state.rangeMode;
+            state.rangeAnchorFloor = null;
+            updateBatchUI();
+            renderVisibleRows();
+        });
+
+        dom.batchAllBtn.addEventListener('click', () => {
+            for (let i = 0; i < state.filteredIndices.length; i++) {
+                state.selectedFloors.add(state.filteredIndices[i]);
+            }
+            state.rangeAnchorFloor = null;
+            updateBatchUI();
+            renderVisibleRows();
+        });
+
+        dom.batchClearBtn.addEventListener('click', () => {
+            state.selectedFloors.clear();
+            state.rangeAnchorFloor = null;
+            state.lastClickedFloor = null;
+            updateBatchUI();
+            renderVisibleRows();
+        });
+
+        dom.batchHideBtn.addEventListener('click', async () => {
+            if (!state.selectedFloors.size) return;
+            const targets = Array.from(state.selectedFloors);
+            await setFloorsHidden(targets, true);
+            state.selectedFloors.clear();
+            state.rangeAnchorFloor = null;
+            updateBatchUI();
+            renderVisibleRows();
+        });
+
+        dom.batchShowBtn.addEventListener('click', async () => {
+            if (!state.selectedFloors.size) return;
+            const targets = Array.from(state.selectedFloors);
+            await setFloorsHidden(targets, false);
+            state.selectedFloors.clear();
+            state.rangeAnchorFloor = null;
+            updateBatchUI();
+            renderVisibleRows();
+        });
+
         // 筛选标签切换
         dom.tabs.addEventListener('click', (e) => {
             const btn = e.target instanceof Element ? e.target.closest('.fj_tab') : null;
@@ -753,7 +1010,7 @@
         // 虚拟列表滚动
         dom.viewport.addEventListener('scroll', scheduleRender, { passive: true });
 
-        // 列表项事件委托（点击跳转 / 收藏 / 编辑备注）
+        // 列表项事件委托（点击跳转 / 多选连选 / 隐藏显示 / 收藏 / 编辑备注）
         dom.items.addEventListener('click', (e) => {
             const target = e.target instanceof Element ? e.target : null;
             if (!target) return;
@@ -765,7 +1022,12 @@
                 const floor = Number(actionBtn.getAttribute('data-floor'));
                 if (!Number.isInteger(floor)) return;
 
-                if (action === 'star') {
+                if (action === 'hide') {
+                    const msg = getChat()[floor];
+                    if (msg) {
+                        setFloorsHidden([floor], !Boolean(msg.is_system));
+                    }
+                } else if (action === 'star') {
                     if (isBookmarked(floor)) {
                         removeBookmark(floor);
                         updateFooterStatus(`已移除 #${floor} 书签`);
@@ -781,12 +1043,43 @@
             }
 
             const row = target.closest('.fj_item[data-floor]');
-            if (row) {
-                const floor = Number(row.getAttribute('data-floor'));
-                if (Number.isInteger(floor)) {
-                    jumpToFloor(floor);
+            if (!row) return;
+
+            const floor = Number(row.getAttribute('data-floor'));
+            if (!Number.isInteger(floor)) return;
+
+            if (state.batchMode) {
+                if (e.shiftKey && state.lastClickedFloor !== null) {
+                    const added = selectRangeBetween(state.lastClickedFloor, floor);
+                    state.lastClickedFloor = floor;
+                    state.rangeAnchorFloor = null;
+                    updateFooterStatus(`已连选 ${added} 个楼层`);
+                } else if (state.rangeMode) {
+                    if (state.rangeAnchorFloor === null) {
+                        state.rangeAnchorFloor = floor;
+                        state.selectedFloors.add(floor);
+                        state.lastClickedFloor = floor;
+                        updateFooterStatus(`已设连选起点 #${floor}，请点终点`);
+                    } else {
+                        const added = selectRangeBetween(state.rangeAnchorFloor, floor);
+                        state.rangeAnchorFloor = null;
+                        state.lastClickedFloor = floor;
+                        updateFooterStatus(`已连选 ${added} 个楼层`);
+                    }
+                } else {
+                    if (state.selectedFloors.has(floor)) {
+                        state.selectedFloors.delete(floor);
+                    } else {
+                        state.selectedFloors.add(floor);
+                    }
+                    state.lastClickedFloor = floor;
                 }
+                updateBatchUI();
+                renderVisibleRows();
+                return;
             }
+
+            jumpToFloor(floor);
         });
 
         // ESC 关闭窗口
@@ -830,6 +1123,9 @@
         };
         const onChatChanged = () => {
             state.lastJumpedIndex = null;
+            state.selectedFloors.clear();
+            state.rangeAnchorFloor = null;
+            state.lastClickedFloor = null;
             if (state.isOpen) rebuildFilteredList(true);
         };
 

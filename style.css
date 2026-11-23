@@ -166,6 +166,41 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    flex-wrap: wrap;
+}
+
+.fj_filter_right {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.fj_batch_toggle {
+    height: 24px;
+    padding: 0 8px;
+    border-radius: 5px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background-color: var(--black30a);
+    color: var(--SmartThemeBodyColor);
+    font-size: 0.78em;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.fj_batch_toggle:hover {
+    background-color: var(--white20a);
+}
+
+.fj_batch_toggle.fj_active {
+    background-color: var(--white20a);
+    border-color: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeQuoteColor);
+    font-weight: 600;
 }
 
 .fj_auto_close_label {
@@ -185,6 +220,80 @@
 
 .fj_auto_close_label:hover {
     color: var(--SmartThemeBodyColor);
+}
+
+/* 批量多选操作栏 */
+.fj_batch_bar {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background-color: var(--black30a);
+}
+
+.fj_batch_bar.fj_hidden {
+    display: none;
+}
+
+.fj_batch_row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.fj_batch_group {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.fj_batch_btn {
+    height: 24px;
+    padding: 0 7px;
+    border-radius: 5px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background-color: transparent;
+    color: var(--SmartThemeBodyColor);
+    font-size: 0.78em;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.fj_batch_btn:hover:not(:disabled) {
+    background-color: var(--white20a);
+}
+
+.fj_batch_btn:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
+}
+
+.fj_batch_btn.fj_active {
+    background-color: var(--white20a);
+    border-color: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeQuoteColor);
+    font-weight: 600;
+}
+
+.fj_batch_btn_accent {
+    border-color: var(--SmartThemeQuoteColor);
+}
+
+.fj_batch_hint {
+    font-size: 0.75em;
+    color: var(--SmartThemeEmColor);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .fj_tab {
@@ -299,6 +408,56 @@
 
 .fj_item:hover {
     filter: brightness(1.12);
+}
+
+.fj_item.fj_is_hidden .fj_sender,
+.fj_item.fj_is_hidden .fj_item_preview {
+    opacity: 0.58;
+}
+
+.fj_item.fj_is_selected {
+    box-shadow: inset 3px 0 0 var(--SmartThemeQuoteColor);
+    background-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 16%, transparent);
+}
+
+.fj_item.fj_is_range_anchor {
+    box-shadow: inset 3px 0 0 var(--SmartThemeUnderlineColor);
+}
+
+.fj_select_box {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    color: var(--SmartThemeEmColor);
+    font-size: 0.9em;
+}
+
+.fj_item.fj_is_selected .fj_select_box {
+    color: var(--SmartThemeQuoteColor);
+}
+
+.fj_hidden_tag {
+    font-size: 0.7em;
+    padding: 0 4px;
+    border-radius: 3px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    color: var(--SmartThemeEmColor);
+    flex-shrink: 0;
+    line-height: 1.35;
+}
+
+.fj_hide_btn {
+    width: 22px;
+    height: 22px;
+    font-size: 0.8em;
+    color: var(--SmartThemeEmColor);
+}
+
+.fj_hide_btn.fj_hidden_state {
+    color: var(--SmartThemeQuoteColor);
 }
 
 .fj_item_top {
