@@ -643,12 +643,12 @@
     will-change: transform;
 }
 
-/* 滑动时浮现的右下角快捷切楼悬浮按钮 */
+/* 滑动时浮现的快捷切楼悬浮按钮（挂在 #sheld 内部，贴近聊天区右侧滚动条） */
 #fj_fab {
-    position: fixed;
-    right: 14px;
-    bottom: max(84px, calc(var(--bottomFormBlockSize, 48px) + 46px));
-    z-index: 3050;
+    position: absolute;
+    right: 18px;
+    bottom: max(76px, calc(var(--bottomFormBlockSize, 48px) + 34px));
+    z-index: 9999;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -658,6 +658,10 @@
     pointer-events: none;
     transform: translateY(6px);
     transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s ease;
+}
+
+body > #fj_fab {
+    position: fixed;
 }
 
 #fj_fab.fj_fab_visible {

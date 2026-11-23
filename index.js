@@ -1344,7 +1344,8 @@
                 <i class="fa-solid fa-layer-group"></i>
             </button>
         `;
-        document.body.appendChild(fab);
+        const host = document.getElementById('sheld') || document.body;
+        host.appendChild(fab);
 
         dom.fab = fab;
         dom.fabMain = fab.querySelector('#fj_fab_main');
