@@ -4,19 +4,31 @@
     const EXT_ID = 'floor_jumper';
     const METADATA_KEY = 'floor_jumper_bookmarks';
     const POS_STORAGE_KEY = 'st_floor_jumper_window_pos';
+    const AUTO_CLOSE_STORAGE_KEY = 'st_floor_jumper_auto_close';
     const ROW_HEIGHT = 58;
     const OVERSCAN = 6;
     const PREVIEW_MAX_LEN = 72;
+
+    function loadAutoClosePref() {
+        try {
+            const val = localStorage.getItem(AUTO_CLOSE_STORAGE_KEY);
+            return val === null ? true : val === '1';
+        } catch {
+            return true;
+        }
+    }
 
     const state = {
         isOpen: false,
         filter: 'all',      // 'all' | 'user' | 'bot' | 'bookmark'
         query: '',
         reverseOrder: false,
+        autoClose: loadAutoClosePref(),
         filteredIndices: [],
         lastJumpedIndex: null,
         rafId: null,
         searchTimer: null,
+        noticeTimer: null,
         isJumping: false,
     };
 
@@ -145,42 +157,87 @@
         return true;
     }
 
+    /** 等待浏览器完成下一次绘制，确保加载动画先渲染出来 */
+    function nextPaint() {
+        return new Promise((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(resolve));
+        });
+    }
+
+    /** 插件自带轻提示 / 加载状态条（替代原生 toastr） */
+    function showNotice(text, options = {}) {
+        const { loading = false, type = 'success', duration = 1600 } = options;
+        if (!dom.notice || !dom.noticeIcon || !dom.noticeText) return;
+
+        clearTimeout(state.noticeTimer);
+        state.noticeTimer = null;
+
+        if (loading) {
+            dom.noticeIcon.className = 'fa-solid fa-spinner fa-spin fj_notice_icon';
+        } else if (type === 'info') {
+            dom.noticeIcon.className = 'fa-solid fa-circle-info fj_notice_icon';
+        } else {
+            dom.noticeIcon.className = 'fa-solid fa-check fj_notice_icon';
+        }
+
+        dom.noticeText.textContent = text;
+        dom.notice.classList.add('fj_notice_visible');
+
+        if (!loading && duration > 0) {
+            state.noticeTimer = setTimeout(() => {
+                dom.notice?.classList.remove('fj_notice_visible');
+            }, duration);
+        }
+    }
+
     /** 跳转到指定楼层（自动处理未渲染历史楼层的加载） */
     async function jumpToFloor(rawIndex) {
         const chat = getChat();
         if (!chat.length) {
-            window.toastr?.info('当前没有聊天记录');
+            updateFooterStatus('当前没有聊天记录');
+            showNotice('当前没有聊天记录', { type: 'info' });
             return;
         }
 
         const index = Number(rawIndex);
         if (!Number.isInteger(index) || index < 0 || index >= chat.length) {
-            window.toastr?.warning(`请输入有效楼层号（0 ~ ${chat.length - 1}）`);
+            const msg = `请输入有效楼层号（0 ~ ${chat.length - 1}）`;
+            updateFooterStatus(msg);
+            showNotice(msg, { type: 'info', duration: 2000 });
             return;
         }
 
         if (state.isJumping) return;
         state.isJumping = true;
-        updateFooterStatus(`正在跳转到 #${index}…`);
 
         try {
             state.lastJumpedIndex = index;
+            const alreadyRendered = Boolean(document.querySelector(`#chat .mes[mesid="${index}"]`));
+
+            if (state.autoClose && state.isOpen) {
+                toggleWindow(false);
+            }
 
             // 1. 已渲染在页面中：直接平滑滚动，零开销
-            if (scrollToRenderedFloor(index)) {
+            if (alreadyRendered && scrollToRenderedFloor(index)) {
                 updateFooterStatus(`已定位到 #${index}`);
+                showNotice(`已跳转到 #${index}`);
                 return;
             }
 
-            // 2. 未渲染：优先调用酒馆内置 /chat-jump（自动按需加载历史楼层并滚动）
+            // 2. 未渲染：先画出加载动画，再触发酒馆加载历史楼层
+            updateFooterStatus(`正在加载并跳转到 #${index}…`);
+            showNotice(`正在加载历史楼层并跳转到 #${index}…`, { loading: true });
+            await nextPaint();
+
             const ctx = getContext();
             if (typeof ctx?.executeSlashCommandsWithOptions === 'function') {
                 await ctx.executeSlashCommandsWithOptions(`/chat-jump ${index}`, {
                     handleExecutionErrors: false,
                 });
-                // 校验是否成功渲染并确保滚动到位
                 if (scrollToRenderedFloor(index)) {
                     updateFooterStatus(`已加载并定位到 #${index}`);
+                    showNotice(`已跳转到 #${index}`);
                     return;
                 }
             }
@@ -193,12 +250,13 @@
                 await new Promise(r => setTimeout(r, 120));
                 if (scrollToRenderedFloor(index)) {
                     updateFooterStatus(`已加载并定位到 #${index}`);
+                    showNotice(`已跳转到 #${index}`);
                     return;
                 }
             }
 
-            window.toastr?.warning(`未能定位到 #${index}，请尝试手动加载历史消息`);
             updateFooterStatus(`定位 #${index} 失败`);
+            showNotice(`未能定位到 #${index}，请尝试手动加载历史消息`, { type: 'info', duration: 2400 });
         } finally {
             state.isJumping = false;
         }
@@ -229,7 +287,9 @@
         }
 
         if (target === -1) {
-            window.toastr?.info(direction < 0 ? '前面没有更早的用户消息了' : '后面没有更新的用户消息了');
+            const msg = direction < 0 ? '前面没有更早的用户消息了' : '后面没有更新的用户消息了';
+            updateFooterStatus(msg);
+            showNotice(msg, { type: 'info' });
             return;
         }
         jumpToFloor(target);
@@ -404,7 +464,6 @@
             clampWindowToViewport();
             rebuildFilteredList(false);
             updateFooterStatus('就绪');
-            dom.jumpInput?.focus();
         }
     }
 
@@ -551,6 +610,10 @@
                         <button type="button" class="fj_tab" data-filter="bot">角色</button>
                         <button type="button" class="fj_tab" data-filter="bookmark">书签</button>
                     </div>
+                    <label class="fj_auto_close_label" title="点击跳转后自动收起本窗口">
+                        <input type="checkbox" id="fj_auto_close_cb" ${state.autoClose ? 'checked' : ''} />
+                        <span>跳后收起</span>
+                    </label>
                 </div>
             </div>
 
@@ -568,7 +631,16 @@
 
         document.body.appendChild(win);
 
+        // 独立的轻提示/加载条，窗口收起后依然可见
+        const notice = document.createElement('div');
+        notice.id = 'fj_notice';
+        notice.innerHTML = '<i class="fa-solid fa-check fj_notice_icon"></i><span class="fj_notice_text"></span>';
+        document.body.appendChild(notice);
+
         dom.win = win;
+        dom.notice = notice;
+        dom.noticeIcon = notice.querySelector('.fj_notice_icon');
+        dom.noticeText = notice.querySelector('.fj_notice_text');
         dom.dragHandle = win.querySelector('#fj_drag_handle');
         dom.stats = win.querySelector('#fj_stats');
         dom.sortBtn = win.querySelector('#fj_sort_btn');
@@ -583,6 +655,7 @@
         dom.searchInput = win.querySelector('#fj_search_input');
         dom.searchClear = win.querySelector('#fj_search_clear');
         dom.tabs = win.querySelector('#fj_tabs');
+        dom.autoCloseCb = win.querySelector('#fj_auto_close_cb');
         dom.viewport = win.querySelector('#fj_list_viewport');
         dom.spacer = win.querySelector('#fj_list_spacer');
         dom.items = win.querySelector('#fj_list_items');
@@ -653,6 +726,14 @@
             state.query = '';
             rebuildFilteredList(true);
             dom.searchInput.focus();
+        });
+
+        // 跳转后自动收起开关
+        dom.autoCloseCb.addEventListener('change', () => {
+            state.autoClose = dom.autoCloseCb.checked;
+            try {
+                localStorage.setItem(AUTO_CLOSE_STORAGE_KEY, state.autoClose ? '1' : '0');
+            } catch { /* ignore */ }
         });
 
         // 筛选标签切换
