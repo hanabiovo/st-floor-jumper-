@@ -37,7 +37,7 @@
         reverseOrder: false,
         autoClose: loadBoolPref(AUTO_CLOSE_STORAGE_KEY, true),
         fabEnabled: loadBoolPref(FAB_ENABLED_STORAGE_KEY, true),
-        fabMidAction: loadStrPref(FAB_MID_ACTION_STORAGE_KEY, ['jump_input', 'nearest_visible'], 'jump_input'),
+        fabMidAction: loadStrPref(FAB_MID_ACTION_STORAGE_KEY, ['jump_input', 'nearest_visible', 'open_panel'], 'jump_input'),
         fabExpanded: false,
         fabHideTimer: null,
         batchMode: false,
@@ -887,6 +887,7 @@
                     <select id="fj_fab_mid_select" class="fj_setting_select">
                         <option value="jump_input" ${state.fabMidAction === 'jump_input' ? 'selected' : ''}>输入楼层号跳转</option>
                         <option value="nearest_visible" ${state.fabMidAction === 'nearest_visible' ? 'selected' : ''}>抵达最近未隐藏楼层</option>
+                        <option value="open_panel" ${state.fabMidAction === 'open_panel' ? 'selected' : ''}>打开插件面板</option>
                     </select>
                 </div>
             </div>
@@ -1051,14 +1052,18 @@
         });
 
         dom.fabMidSelect.addEventListener('change', () => {
-            state.fabMidAction = dom.fabMidSelect.value === 'nearest_visible' ? 'nearest_visible' : 'jump_input';
+            const val = dom.fabMidSelect.value;
+            state.fabMidAction = ['jump_input', 'nearest_visible', 'open_panel'].includes(val) ? val : 'jump_input';
             try {
                 localStorage.setItem(FAB_MID_ACTION_STORAGE_KEY, state.fabMidAction);
             } catch { /* ignore */ }
             updateFabMidButton();
-            updateFooterStatus(state.fabMidAction === 'nearest_visible'
-                ? '悬浮中键：最近未隐藏楼层'
-                : '悬浮中键：输入楼层号跳转');
+            const labelMap = {
+                jump_input: '输入楼层号跳转',
+                nearest_visible: '最近未隐藏楼层',
+                open_panel: '打开插件面板',
+            };
+            updateFooterStatus(`悬浮中键：${labelMap[state.fabMidAction]}`);
         });
 
         dom.refreshBtn.addEventListener('click', () => {
@@ -1282,6 +1287,9 @@
         if (state.fabMidAction === 'nearest_visible') {
             dom.fabMid.title = '抵达最近的未隐藏楼层';
             dom.fabMid.innerHTML = '<i class="fa-regular fa-eye"></i>';
+        } else if (state.fabMidAction === 'open_panel') {
+            dom.fabMid.title = '打开楼层跳转面板';
+            dom.fabMid.innerHTML = '<i class="fa-solid fa-layer-group"></i>';
         } else {
             dom.fabMid.title = '输入楼层号跳转';
             dom.fabMid.innerHTML = '<i class="fa-solid fa-hashtag"></i>';
@@ -1294,7 +1302,7 @@
         dom.fab.classList.toggle('fj_fab_expanded', state.fabExpanded);
         dom.fabMain.innerHTML = state.fabExpanded
             ? '<i class="fa-solid fa-xmark"></i>'
-            : '<i class="fa-solid fa-layer-group"></i>';
+            : '<i class="fa-solid fa-sort"></i>';
         dom.fabMain.title = state.fabExpanded ? '收起快捷切楼' : '快捷切楼';
         if (state.fabExpanded) {
             showFabTemporarily(5000);
@@ -1309,7 +1317,7 @@
             dom.fab.classList.remove('fj_fab_visible', 'fj_fab_expanded');
         }
         if (dom.fabMain) {
-            dom.fabMain.innerHTML = '<i class="fa-solid fa-layer-group"></i>';
+            dom.fabMain.innerHTML = '<i class="fa-solid fa-sort"></i>';
         }
     }
 
@@ -1341,7 +1349,7 @@
                 </button>
             </div>
             <button type="button" class="fj_fab_btn fj_fab_main" id="fj_fab_main" title="快捷切楼">
-                <i class="fa-solid fa-layer-group"></i>
+                <i class="fa-solid fa-sort"></i>
             </button>
         `;
         const host = document.getElementById('sheld') || document.body;
@@ -1369,6 +1377,10 @@
         dom.fabMid.addEventListener('click', (e) => {
             e.stopPropagation();
             setFabExpanded(false);
+            if (state.fabMidAction === 'open_panel') {
+                toggleWindow(true);
+                return;
+            }
             showFabTemporarily(2000);
             if (state.fabMidAction === 'nearest_visible') {
                 jumpToNearestVisibleFloor();
