@@ -45,6 +45,9 @@
         fabExpanded: false,
         fabHideTimer: null,
         fabDragging: false,
+        suppressClickUntil: 0,
+        winOpenedAt: 0,
+        winReadyForClick: false,
         lastUserScrollIntentAt: 0,
         lastScrollTop: null,
         batchMode: false,
@@ -770,6 +773,8 @@
         dom.win.classList.toggle('fj_hidden', !nextOpen);
 
         if (nextOpen) {
+            state.winOpenedAt = Date.now();
+            state.winReadyForClick = false;
             hideFabImmediately();
             state.keptInHiddenTab.clear();
             clampWindowToViewport();
@@ -1044,6 +1049,19 @@
     }
 
     function bindWindowEvents() {
+        // 只有窗口打开后真正发生过按下动作，才放行窗口内点击，彻底杜绝移动端点击穿透
+        dom.win.addEventListener('pointerdown', () => {
+            state.winReadyForClick = true;
+        }, { capture: true, passive: true });
+
+        dom.win.addEventListener('click', (e) => {
+            if (!state.winReadyForClick && Date.now() - state.winOpenedAt < 500) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }
+        }, true);
+
         dom.closeBtn.addEventListener('click', () => toggleWindow(false));
 
         dom.settingsBtn.addEventListener('click', () => {
@@ -1500,6 +1518,7 @@
 
             const wasDragging = state.fabDragging;
             const shouldToggle = !wasDragging && !movedTooFar;
+            state.suppressClickUntil = Date.now() + 420;
             resetPress();
 
             if (shouldToggle) {
@@ -1514,31 +1533,57 @@
             resetPress();
         });
 
+        dom.fabMain.addEventListener('touchend', (e) => {
+            if (e.cancelable) e.preventDefault();
+            e.stopPropagation();
+        }, { passive: false });
+
         // 阻止 pointerup 后重复触发默认 click
         dom.fabMain.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
         });
 
-        // 子按钮同样用 pointerup 即时响应，避免滚动惯性吞掉点击
+        // 子按钮同样用 pointerup 即时响应，并拦截移动端合成的幽灵 click 防止穿透到新打开的面板或聊天层
         const bindSubBtn = (btn, handler) => {
+            let pressed = false;
             btn.addEventListener('pointerdown', (e) => {
+                if (!e.isPrimary) return;
+                pressed = true;
                 e.stopPropagation();
                 clearTimeout(state.fabHideTimer);
             });
             btn.addEventListener('pointerup', (e) => {
-                if (!e.isPrimary) return;
+                if (!e.isPrimary || !pressed) return;
+                pressed = false;
                 e.preventDefault();
                 e.stopPropagation();
+                state.suppressClickUntil = Date.now() + 420;
                 setFabExpanded(false);
                 showFabTemporarily(1000);
                 handler();
             });
+            btn.addEventListener('pointercancel', () => {
+                pressed = false;
+            });
+            btn.addEventListener('touchend', (e) => {
+                if (e.cancelable) e.preventDefault();
+                e.stopPropagation();
+            }, { passive: false });
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
             });
         };
+
+        // 捕获阶段全局拦截悬浮按钮松手后 420ms 内浏览器延迟派发的合成 click
+        document.addEventListener('click', (e) => {
+            if (Date.now() < state.suppressClickUntil) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }
+        }, true);
 
         bindSubBtn(dom.fabTop, () => jumpToFloor(0));
         bindSubBtn(dom.fabMid, () => {
